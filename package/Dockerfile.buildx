@@ -1,0 +1,73 @@
+FROM golang:1.17-alpine as builder
+
+ARG TARGETARCH
+ENV ARCH $TARGETARCH
+ENV GOPROXY="https://goproxy.cn,direct"
+
+RUN apk -U add bash git gcc musl-dev docker vim less file curl wget ca-certificates
+RUN go get -u golang.org/x/lint/golint
+RUN go install golang.org/x/tools/cmd/goimports@latest
+
+RUN mkdir -p /go/src/github.com/rancher/security-scan/
+WORKDIR /go/src/github.com/rancher/security-scan/
+COPY . /go/src/github.com/rancher/security-scan/
+RUN scripts/build && scripts/test && scripts/validate
+
+FROM registry.suse.com/suse/sle15:15.3 as intermediate
+
+ARG proxy
+
+#Label the image for cleaning after build process
+LABEL stage=intermediate
+
+RUN zypper --non-interactive update \
+    && zypper --non-interactive install \
+    git
+
+RUN export https_proxy=${proxy} && git clone -b v0.6.8 --depth 1 https://github.com/aquasecurity/kube-bench.git
+
+FROM registry.suse.com/suse/sle15:15.3
+ARG proxy
+ARG TARGETARCH
+ENV ARCH $TARGETARCH
+ARG kubectl_version=1.24.10
+ARG kube_bench_tag=0.6.8
+ARG sonobuoy_version=0.56.7
+
+RUN export https_proxy=${proxy} \
+    && zypper --non-interactive update \
+    && zypper --non-interactive install \
+    curl \
+    jq \
+    vim \
+    systemd \
+    tar \
+    awk
+RUN export https_proxy=${proxy} \
+    && curl -sLf https://storage.googleapis.com/kubernetes-release/release/v${kubectl_version}/bin/linux/${ARCH}/kubectl > /usr/local/bin/kubectl-1.24 \
+    && ln -sv /usr/local/bin/kubectl-1.24 /usr/local/bin/kubectl \
+    && chmod +x /usr/local/bin/kubectl*
+RUN export https_proxy=${proxy} && curl -sLf https://github.com/vmware-tanzu/sonobuoy/releases/download/v${sonobuoy_version}/sonobuoy_${sonobuoy_version}_linux_${ARCH}.tar.gz | tar -xvzf - -C /usr/bin sonobuoy
+RUN export https_proxy=${proxy} && curl -sLf https://github.com/aquasecurity/kube-bench/releases/download/v${kube_bench_tag}/kube-bench_${kube_bench_tag}_linux_${ARCH}.tar.gz | tar -xvzf - -C /usr/bin
+#RUN curl -sLf https://github.com/leodotcloud/kube-bench/releases/download/v${kube_bench_tag}/kube-bench.tar.gz | tar -xvzf - -C /usr/bin
+
+COPY --from=intermediate /kube-bench/cfg /etc/kube-bench/cfg/
+
+COPY --from=builder /go/src/github.com/rancher/security-scan/package/cfg/ /etc/kube-bench/cfg/
+COPY --from=builder /go/src/github.com/rancher/security-scan/package/run.sh \
+    /go/src/github.com/rancher/security-scan/package/run_sonobuoy_plugin.sh \
+    /go/src/github.com/rancher/security-scan/bin/kb-summarizer \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_files_permissions.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_files_owner_in_dir.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_encryption_provider_config.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_for_network_policies.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_for_default_sa.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_for_default_ns.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_for_k3s_etcd.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_for_rke2_network_policies.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_for_rke2_cni_net_policy_support.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_cafile_permissions.sh \
+    /go/src/github.com/rancher/security-scan/package/helper_scripts/check_cafile_ownership.sh \
+    /usr/bin/
+
+CMD ["run.sh"]
