@@ -23,5 +23,5 @@ if [ -e ${DOCKERFILE}.${ARCH} ]; then
     DOCKERFILE=${DOCKERFILE}.${ARCH}
 fi
 
-docker build -f ${DOCKERFILE} -t ${IMAGE} .
+docker build -f ${DOCKERFILE} -t ${IMAGE} --build-arg ARCH=${ARCH} .
 echo Built ${IMAGE}
